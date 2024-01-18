@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/BishopFox/jsluice"
 	"github.com/gocolly/colly"
 	"github.com/pelletier/go-toml"
 )
@@ -73,24 +74,41 @@ func main() {
 
 	// Where to find external references in HTML
 	// attribute, selectors for it
-	selectors := map[string]string{
+	htmlSelectors := map[string]string{
 		"src": "script[src], img[src], video[src], audio[src], embed[src], iframe[src], source[src], track[src], picture[srcset], meta[content]",
 		"href": "a[href], link[rel='stylesheet'][href]",
 		"data": "object[data]",
 	}
-	// TODO: Also parse XML, SVGs, and CSS for external references.
-
-	for attr, selector := range selectors {
+	
+	// Where to find external references in XML
+	// attribute, selectors for it
+	xmlSelectors := map[string]string{
+		"url": "[src],[href],[action],[background],[cite],[classid],[codebase],[data],[longdesc],[profile],[usemap]",
+	}
+	
+	for attr, selector := range htmlSelectors {
 		c.OnHTML(selector, func(e *colly.HTMLElement) {
 			e.Request.Visit(e.Attr(attr))
 		})
 	}
 
+	for attr, selector := range xmlSelectors {
+		c.OnXML(selector, func(e *colly.XMLElement) {
+			e.Request.Visit(e.Attr(attr))
+		})
+	}
+
+	// TODO: Crawl SVG (xlink:href) and CSS files for external references
+
 	c.OnResponse(func(r *colly.Response) {
 		if (r.Headers.Get("content-type") == "text/javascript" || r.Headers.Get("content-type") == "application/javascript") {
 			ext := filepath.Ext(r.Request.URL.Path)
 			if (ext == ".js" || ext == ".mjs") {
-				// TODO: Use https://github.com/BishopFox/jsluice to get the file references out of the JS files
+				analyzer := jsluice.NewAnalyzer(r.Body)
+
+				for _, url := range analyzer.GetURLs() {
+					r.Request.Visit(url.URL)
+				}
 			}
 		}
 
