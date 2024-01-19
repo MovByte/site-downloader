@@ -1,158 +1,108 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
-	"io"
-	"net/url"
-	"strconv"
-	"strings"
+	"context"
+	"log"
 	"time"
 
-	// "log/slog"
-	"os"
-	"path/filepath"
+	config "github.com/MovByte/site-downloader/getConfig"
+	getLinksFrom "github.com/MovByte/site-downloader/getLinksFrom"
+	resourceAttrsMap "github.com/MovByte/site-downloader/resourceAttrsMap"
 
-	"github.com/BishopFox/jsluice"
-	"github.com/gocolly/colly"
-	"github.com/tdewolff/parse/css"
-	// TODO: Import htmlCollection.go
-	// TODO: Import getConfig.go
+	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/chromedp"
 )
 
-// TODO: For dynamic sites like BGS, combine colly with ferret for headless scraping
+// TODO: Use slog
+
+// These are only partially implemented, for what is needed
+type SitemapIndex struct {
+	Loc string `xml:"loc"`
+}
+type Urlset struct {
+	Url []SitemapIndex `xml:"url"`
+}
+
+type WebAppManifest struct {
+	Scope string `json:"scope"`
+	StartURL string `json:"start_url"`
+	Icons []struct {
+		Src string `json:"src"`
+	} `json:"icons"`
+	RelatedApplications []struct {
+		Platform struct {
+			URL string `json:"url"`
+		} `json:"platform"`
+	} `json:"related_applications"`
+}
+
+var links []string
+
 func main() {
+	config := config.GetConfig()
 
-	// Setup logging
-	// JSON error logging
-	if (config.ErrorLogFile != "") {
-		// Create the file, if it doesn't already exist
-		jsonFile, err := os.OpenFile(config.ErrorLogFile, os.O_CREATE|os.O_WRONLY, 0644)
-		if (err != nil) {
-			panic(err)
-		}
-		defer jsonFile.Close()
-	}
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
 
-	// TODO: Use
-	/*
-	var handler slog.Handler
-	if (config.ErrorLogFile != "") {
-		options := &slog.HandlerOptions{}
-		handler = slog.NewJSONHandler(jsonFile, options)
-	}
-	*/
+	// create a timeout
+	ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 
-	parsedWebsiteURL, err := url.Parse(config.Website)
-	if (err != nil) {
-		panic(err)
-	}
-
-	c := colly.NewCollector(
-		//colly.Debugger(&debug.LogDebugger{}),
-		colly.IgnoreRobotsTxt(),
-		colly.AllowedDomains(parsedWebsiteURL.Hostname()),
-	)
-
-
-	
-	// Where to find external references in XML
-	// attribute, selectors for it
-	/*
-	xmlSelectors := map[string]string{
-		"url": "[src],[href],[action],[background],[cite],[classid],[codebase],[data],[longdesc],[profile],[usemap]",
-	}
-	*/
-	
-	for attr, selectors := range htmlSelectors {
-		for _, selector := range selectors {
-			c.OnHTML(selector, func(e *colly.HTMLElement) {
-				e.Request.Visit(e.Attr(attr))
-				c.Visit(e.Attr(attr))
-			})
-		}
-	}
-	// TODO: Parse the inline CSS
-	// TODO: Parse the inline JS
-
-
-	/*
-	for attr, selector := range xmlSelectors {
-		c.OnXML(selector, func(e *colly.XMLElement) {
-			e.Request.Visit(e.Attr(attr))
-		})
-	}
-	*/
-
-	// TODO: Crawl SVG (xlink:href)
-
-	crawlStartTime := time.Now().Unix()
-	c.OnResponse(func(r *colly.Response) {
-		if (r.Headers.Get("content-type") == "text/javascript" || r.Headers.Get("content-type") == "application/javascript") {
-			ext := filepath.Ext(r.Request.URL.Path)
-			if (ext == ".js" || ext == ".mjs") {
-				analyzer := jsluice.NewAnalyzer(r.Body)
-
-				for _, url := range analyzer.GetURLs() {
-					r.Request.Visit(url.URL)
-				}
-			}
-		}
-		if (r.Headers.Get("content-type") == "text/css") {
-			p := css.NewParser(bytes.NewReader(r.Body), false)
-			for {
-				gt, tt, data := p.Next()
-				if gt == css.GrammarType(css.ErrorToken) || tt == css.ErrorToken {
-					// TODO: Log that the CSS is broken
-					break
-				}
-		 
-				// Check if the token is a URL token
-				if tt == css.URLToken {
-					r.Request.Visit(string(data))
-				}
-			}
-		}
-
-		fmt.Println(r.Request.URL.String());
-
-		path := strings.Trim(r.Request.URL.Path, "/")
-		segments := strings.Split(path, "/")
-		dir := filepath.Join(config.OutDir, strconv.FormatInt(crawlStartTime, 10), r.Request.URL.Hostname())
-		fmt.Println(dir);
-		for _, segment := range segments {
-		   if segment != "" {
-			   dir = filepath.Join(dir, segment)
-			   if err := os.MkdirAll(dir, 0755); err != nil {
-				   panic(err)
-			   }
-		   }
-		}
-		// Still create the base directory then
-		if (len(segments) == 1) {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				panic(err)
-			}
-		}
-
-		networkFile := filepath.Base(r.Request.URL.Path)
-		if (networkFile == "/") {
-            networkFile = "/index.html"
-        }
-		fmt.Println(filepath.Join(dir, networkFile))
-		dlFile, err := os.OpenFile(filepath.Join(dir, networkFile), os.O_CREATE|os.O_WRONLY, 0644)
-		if (err != nil) {
-			panic(err)
-		}
-		defer dlFile.Close()
-
-		// Write the file to the disk
-		_, err = io.Copy(dlFile, bytes.NewBuffer(r.Body))
-		if (err != nil) {
-			panic(err)
+	// listen for network events
+	chromedp.ListenTarget(ctx, func(ev interface{}) {
+		switch ev := ev.(type) {
+		case *network.EventRequestWillBeSent:
+			log.Printf("request %s %s", ev.Request.Method, ev.Request.URL)
 		}
 	})
 
-	// The intitial visit
-	c.Visit(config.Website)
+	for attr, selectors := range resourceAttrsMap.HTMLResourceSelectors {
+		for _, selector := range selectors {
+            err := chromedp.Run(ctx, chromedp.Nodes(selector, chromedp.Attr(attr)))
+            if err!= nil {
+                log.Fatal(err)
+            }
+        }
+	}
+
+	parsedUrl, err := url.parse(config.Website)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	getLinksFrom.SiteMap(parsedUrl.origin, links)
+
+	cacheManifestPath := ""
+	manifestPath := "manifest.json"
+
+	err = chromedp.Run(ctx,
+		network.Enable(),
+		chromedp.Navigate(config.Website),
+		chromedp.WaitReady(`body`),
+		// TODO: Meta Refresh Tag
+		// TODO: https://developers.google.com/search/docs/crawling-indexing/consolidate-duplicate-urls
+		// TODO: Open Graph Tags
+		chromedp.Evaluate(`document.getElementsByClassname("body")?.[0].getAttribute("manifest")`, manifestPath),
+		chromedp.Evaluate(`Array.from(document.querySelectorAll('a')).map(a => a.href)`, links),
+		// TODO: Get every form element and look at the action and method attributes
+	)
+
+	if (manifestPath != "") {
+		getLinksFrom.WebAppManifest(parsedUrl.origin, manifestPath, links)
+	}
+	getLinksFrom.CacheManifest(parsedUrl.origin, manifestPath, links)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, link := range links {
+		err := chromedp.Run(ctx,
+			chromedp.Click(link, chromedp.NodeVisible),
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 }
